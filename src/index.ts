@@ -32,6 +32,11 @@ export function splitOnOperators(command: string): OperatorSegment[] {
     }
 
     if (char === '"' && !inSingleQuote) {
+      if (inDoubleQuote && i > 0 && command[i - 1] === '\\') {
+        current += char
+        i++
+        continue
+      }
       inDoubleQuote = !inDoubleQuote
       current += char
       i++
@@ -280,15 +285,27 @@ function extractEnvPrefix(command: string): string {
 function findFirstPipe(command: string): number {
   let inSingleQuote = false
   let inDoubleQuote = false
+  let dollarParenDepth = 0
+  let backtickDepth = 0
 
   for (let i = 0; i < command.length; i++) {
     const char = command[i]
 
-    if (char === "'" && !inDoubleQuote) {
+    if (char === "'" && !inDoubleQuote && dollarParenDepth === 0 && backtickDepth === 0) {
       inSingleQuote = !inSingleQuote
-    } else if (char === '"' && !inSingleQuote) {
+    } else if (char === '"' && !inSingleQuote && dollarParenDepth === 0 && backtickDepth === 0) {
+      if (inDoubleQuote && i > 0 && command[i - 1] === '\\') {
+        continue
+      }
       inDoubleQuote = !inDoubleQuote
-    } else if (char === '|' && !inSingleQuote && !inDoubleQuote) {
+    } else if (char === '$' && command[i + 1] === '(' && !inSingleQuote && !inDoubleQuote) {
+      dollarParenDepth++
+      i++
+    } else if (char === ')' && dollarParenDepth > 0 && !inSingleQuote && !inDoubleQuote) {
+      dollarParenDepth--
+    } else if (char === '`' && !inSingleQuote && !inDoubleQuote) {
+      backtickDepth = backtickDepth === 0 ? 1 : 0
+    } else if (char === '|' && !inSingleQuote && !inDoubleQuote && dollarParenDepth === 0 && backtickDepth === 0) {
       if (command[i + 1] === '|' || (i > 0 && command[i - 1] === '|')) {
         i++
         continue

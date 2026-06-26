@@ -361,6 +361,30 @@ describe("transformCommand", () => {
       "CGO_ENABLED=0 git status",
     )
   })
+
+  describe("backslash-escaped double quotes", () => {
+    it("should not split ; inside escaped double quotes", () => {
+      const cmd = 'echo "hello \\"world; foo" && bar'
+      expect(transformCommand(cmd, {})).toBe('snip echo "hello \\"world; foo" && snip bar')
+    })
+
+    it("should not treat escaped-double-quote pipe as pipe operator", () => {
+      const cmd = 'echo "hello \\"world | foo" | cat'
+      expect(transformCommand(cmd, {})).toBe('snip echo "hello \\"world | foo" | cat')
+    })
+
+    it("should not let escaped double quote close quoting context", () => {
+      const cmd = 'bash -c "echo \\"hello\\" && echo world" && echo done'
+      expect(transformCommand(cmd, {})).toBe(
+        'snip bash -c "echo \\"hello\\" && echo world" && snip echo done',
+      )
+    })
+  })
+
+  it("should treat unbalanced double quotes as single segment", () => {
+    const cmd = 'echo "hello; world && bar'
+    expect(transformCommand(cmd, {})).toBe('snip echo "hello; world && bar')
+  })
 })
 
 describe("SnipPlugin", () => {
