@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest"
-import { toolExecuteBefore } from "./index"
+import { describe, it, expect, beforeEach, vi } from "vitest"
+import { toolExecuteBefore, SnipPlugin } from "./index"
 
 describe("toolExecuteBefore", () => {
   let mockInput: { tool: string; sessionID: string; callID: string }
@@ -159,6 +159,62 @@ describe("toolExecuteBefore", () => {
     })
   })
 
+  describe("command substitution in env vars (#22)", () => {
+    it("should not snip inside $() substitution", async () => {
+      mockOutput.args.command = "VAR1=$(echo hello) go test"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("VAR1=$(echo hello) snip go test")
+    })
+
+    it("should handle multiple env vars with $()", async () => {
+      mockOutput.args.command = "A=$(date +%s) B=2 cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("A=$(date +%s) B=2 snip cmd")
+    })
+
+    it("should handle spaces inside $() substitution", async () => {
+      mockOutput.args.command = "VAR=$(echo a b c) cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("VAR=$(echo a b c) snip cmd")
+    })
+
+    it("should handle backtick substitution", async () => {
+      mockOutput.args.command = "V=`id -u` cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("V=`id -u` snip cmd")
+    })
+
+    it("should handle double quotes inside $()", async () => {
+      mockOutput.args.command = 'VAR=$(echo "hello world") cmd'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('VAR=$(echo "hello world") snip cmd')
+    })
+
+    it("should handle single quotes inside $()", async () => {
+      mockOutput.args.command = "VAR=$(echo 'hello world') cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("VAR=$(echo 'hello world') snip cmd")
+    })
+
+    it("should handle nested $() substitution", async () => {
+      mockOutput.args.command = "VAR=$(echo $(date)) cmd"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("VAR=$(echo $(date)) snip cmd")
+    })
+
+    it("should handle backtick with env var and operator", async () => {
+      mockOutput.args.command = "V=`id -u` echo hi && echo bye"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("V=`id -u` snip echo hi && snip echo bye")
+    })
+
+    it("should handle mixed $() and simple env vars", async () => {
+      mockOutput.args.command = "FOO=bar VAR=$(echo hello) GOOS=linux go test"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("FOO=bar VAR=$(echo hello) GOOS=linux snip go test")
+    })
+  })
+
   describe("pipe expressions with quotes", () => {
     it("should not split pipes inside single quotes", async () => {
       mockOutput.args.command = "cat file.json | jq '.content | .text'"
@@ -195,5 +251,100 @@ describe("toolExecuteBefore", () => {
       await toolExecuteBefore(mockInput, mockOutput)
       expect(mockOutput.args.command).toBe('snip echo "hello | world" | cat')
     })
+  })
+
+  describe("quote- and $()-aware operator splitting (#23)", () => {
+    it("should not split ; inside double quotes", async () => {
+      mockOutput.args.command = 'ssh root@host "echo hello; echo world"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo hello; echo world"')
+    })
+
+    it("should split && outside quotes but not ; inside quotes", async () => {
+      mockOutput.args.command = 'ssh root@host "echo hello; echo world" && echo done'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip ssh root@host "echo hello; echo world" && snip echo done')
+    })
+
+    it("should not split && inside bash -c double quotes", async () => {
+      mockOutput.args.command = 'bash -c "cd /app && npm test"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip bash -c "cd /app && npm test"')
+    })
+
+    it("should not split && inside docker exec bash -c double quotes", async () => {
+      mockOutput.args.command = 'docker exec c bash -c "cd /app && npm test"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip docker exec c bash -c "cd /app && npm test"')
+    })
+
+    it("should not split ; inside bash -c for-loop double quotes", async () => {
+      mockOutput.args.command = 'bash -c "for i in 1 2 3; do echo $i; done"'
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe('snip bash -c "for i in 1 2 3; do echo $i; done"')
+    })
+
+    it("should not split && inside $()", async () => {
+      mockOutput.args.command = "VAR=$(cmd1 && cmd2) main"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip VAR=$(cmd1 && cmd2) main")
+    })
+
+    it("should not split || inside $()", async () => {
+      mockOutput.args.command = "result=$(cmd1 || fallback) report"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip result=$(cmd1 || fallback) report")
+    })
+
+    it("should split && || ; outside quotes into separate payloads", async () => {
+      mockOutput.args.command = "cmd1 && cmd2 || cmd3"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cmd1 && snip cmd2 || snip cmd3")
+    })
+
+    it("should split ; chained commands", async () => {
+      mockOutput.args.command = "cmd1; cmd2; cmd3"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip cmd1; snip cmd2; snip cmd3")
+    })
+
+    it("should not split && inside backtick command substitution", async () => {
+      mockOutput.args.command = "V=`cmd1 && cmd2` main"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip V=`cmd1 && cmd2` main")
+    })
+
+    it("should split && outside single quotes but not ; inside them", async () => {
+      mockOutput.args.command = "echo 'hello; world' && echo done"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip echo 'hello; world' && snip echo done")
+    })
+
+    it("should handle nested $() with operators", async () => {
+      mockOutput.args.command = "x=$(echo $(cmd1 && cmd2)) outer && cmd3"
+      await toolExecuteBefore(mockInput, mockOutput)
+      expect(mockOutput.args.command).toBe("snip x=$(echo $(cmd1 && cmd2)) outer && snip cmd3")
+    })
+  })
+})
+
+describe("SnipPlugin", () => {
+  it("should return {} when snip is not found", async () => {
+    // $ is a tagged template literal function — mock it to reject for detection
+    const mockDollar = vi.fn((_template: TemplateStringsArray) => ({
+      quiet: () => Promise.reject(new Error("command not found")),
+    }))
+
+    const hooks = await SnipPlugin({ $: mockDollar } as any)
+    expect(hooks).toEqual({})
+  })
+
+  it("should return hooks with tool.execute.before when snip is found", async () => {
+    const mockDollar = vi.fn((_template: TemplateStringsArray) => ({
+      quiet: () => Promise.resolve({ exitCode: 0 }),
+    }))
+
+    const hooks = await SnipPlugin({ $: mockDollar } as any)
+    expect(hooks["tool.execute.before"]).toBeTypeOf("function")
   })
 })
