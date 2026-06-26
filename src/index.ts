@@ -1,10 +1,15 @@
-import type { Hooks, Plugin } from "@opencode-ai/plugin"
+import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 
 const UNPROXYABLE_COMMANDS = new Set([
   "cd", "source", ".", "export", "alias", "unset", "set", "shopt", "eval", "exec",
 ])
 
 export type OperatorSegment = { text: string; isSeparator: boolean }
+
+export type SnipConfig = {
+  skip?: string[]
+  only?: string[]
+}
 
 export function splitOnOperators(command: string): OperatorSegment[] {
   const result: OperatorSegment[] = []
@@ -306,32 +311,68 @@ function snipCommand(command: string): string {
   return `${envPrefix}snip ${bareCmd}`
 }
 
-export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = async (input, output) => {
-  if (input.tool !== "bash") return
+function processSegment(segment: string, config: SnipConfig): string {
+  const envPrefix = extractEnvPrefix(segment)
+  let bareCmd = segment.slice(envPrefix.length).trim()
+  if (!bareCmd) return segment
 
-  const command = output.args.command
-  if (!command || typeof command !== "string") return
+  const firstToken = bareCmd.split(/\s+/)[0]
+
+  if (config.only && config.only.length > 0) {
+    if (!config.only.includes(firstToken)) return segment
+  } else if (config.skip && config.skip.length > 0) {
+    if (config.skip.includes(firstToken)) return segment
+  }
+
+  return snipCommand(segment)
+}
+
+export function transformCommand(command: string, config: SnipConfig): string {
   if (findFirstPipe(command) !== -1) {
     const pipeIdx = findFirstPipe(command)
     const firstCmd = command.slice(0, pipeIdx).trimEnd()
     const rest = command.slice(pipeIdx)
-    output.args.command = snipCommand(firstCmd) + ' ' + rest
-    return
+    return processSegment(firstCmd, config) + ' ' + rest
   }
 
   const segments = splitOnOperators(command)
 
   if (segments.every((s) => !s.isSeparator)) {
-    output.args.command = snipCommand(command)
-    return
+    return processSegment(command, config)
   }
 
-  output.args.command = segments
-    .map((segment) => segment.isSeparator ? segment.text : snipCommand(segment.text))
+  return segments
+    .map((segment) => segment.isSeparator ? segment.text : processSegment(segment.text, config))
     .join("")
 }
 
-export const SnipPlugin: Plugin = async ({ $ }) => {
+export const toolExecuteBefore: NonNullable<Hooks["tool.execute.before"]> = async (input, output) => {
+  if (input.tool !== "bash") return
+
+  const command = output.args.command
+  if (!command || typeof command !== "string") return
+
+  output.args.command = transformCommand(command, {})
+}
+
+function buildConfig(options?: Record<string, unknown>): SnipConfig {
+  const config: SnipConfig = {}
+  if (options) {
+    if (Array.isArray(options.skip)) {
+      config.skip = options.skip.filter((s): s is string => typeof s === 'string')
+    }
+    if (Array.isArray(options.only)) {
+      config.only = options.only.filter((s): s is string => typeof s === 'string')
+    }
+  }
+  return config
+}
+
+type SnipPluginFactory = (input: PluginInput, options?: Record<string, unknown>) => Promise<Hooks>
+
+export const SnipPlugin: SnipPluginFactory = async (input, options) => {
+  const { $ } = input
+
   try {
     await $`sh -c 'command -v snip'`.quiet()
   } catch {
@@ -339,8 +380,15 @@ export const SnipPlugin: Plugin = async ({ $ }) => {
     return {}
   }
 
+  const config = buildConfig(options)
+
   return {
-    "tool.execute.before": toolExecuteBefore,
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "bash") return
+      const command = output.args.command
+      if (!command || typeof command !== "string") return
+      output.args.command = transformCommand(command, config)
+    },
   }
 }
 

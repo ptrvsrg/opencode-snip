@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
-import { toolExecuteBefore, SnipPlugin } from "./index"
+import { toolExecuteBefore, SnipPlugin, transformCommand } from "./index"
 
 describe("toolExecuteBefore", () => {
   let mockInput: { tool: string; sessionID: string; callID: string }
@@ -328,6 +328,41 @@ describe("toolExecuteBefore", () => {
   })
 })
 
+describe("transformCommand", () => {
+  it("should skip commands listed in skip", () => {
+    expect(transformCommand("git status", { skip: ["git"] })).toBe("git status")
+  })
+
+  it("should proxy commands listed in only", () => {
+    expect(transformCommand("go test", { only: ["go"] })).toBe("snip go test")
+  })
+
+  it("should leave commands outside only unchanged", () => {
+    expect(transformCommand("ls -la", { only: ["go"] })).toBe("ls -la")
+  })
+
+  it("should proxy all proxyable commands with default config", () => {
+    expect(transformCommand("go test", {})).toBe("snip go test")
+  })
+
+  it("should apply skip per operator-separated segment", () => {
+    expect(transformCommand("cd /tmp && git status && go test", { skip: ["git"] })).toBe(
+      "cd /tmp && git status && snip go test",
+    )
+  })
+
+  it("should let only take precedence over skip", () => {
+    expect(transformCommand("go test", { only: ["go"], skip: ["go"] })).toBe("snip go test")
+    expect(transformCommand("git status", { only: ["go"], skip: ["git"] })).toBe("git status")
+  })
+
+  it("should match first token after env prefixes", () => {
+    expect(transformCommand("CGO_ENABLED=0 git status", { skip: ["git"] })).toBe(
+      "CGO_ENABLED=0 git status",
+    )
+  })
+})
+
 describe("SnipPlugin", () => {
   it("should return {} when snip is not found", async () => {
     // $ is a tagged template literal function — mock it to reject for detection
@@ -346,5 +381,33 @@ describe("SnipPlugin", () => {
 
     const hooks = await SnipPlugin({ $: mockDollar } as any)
     expect(hooks["tool.execute.before"]).toBeTypeOf("function")
+  })
+
+  it("should bind skip options into the tool.execute.before hook", async () => {
+    const mockDollar = vi.fn((_template: TemplateStringsArray) => ({
+      quiet: () => Promise.resolve({ exitCode: 0 }),
+    }))
+    const hooks = await SnipPlugin({ $: mockDollar } as any, { skip: ["git"] })
+    const hook = hooks["tool.execute.before"]
+    expect(hook).toBeTypeOf("function")
+
+    const output = { args: { command: "git status && go test" } }
+    await hook?.({ tool: "bash", sessionID: "s", callID: "c" }, output)
+
+    expect(output.args.command).toBe("git status && snip go test")
+  })
+
+  it("should ignore malformed options", async () => {
+    const mockDollar = vi.fn((_template: TemplateStringsArray) => ({
+      quiet: () => Promise.resolve({ exitCode: 0 }),
+    }))
+    const hooks = await SnipPlugin({ $: mockDollar } as any, { skip: 42 })
+    const hook = hooks["tool.execute.before"]
+    expect(hook).toBeTypeOf("function")
+
+    const output = { args: { command: "git status" } }
+    await hook?.({ tool: "bash", sessionID: "s", callID: "c" }, output)
+
+    expect(output.args.command).toBe("snip git status")
   })
 })
